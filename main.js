@@ -29,6 +29,8 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian3 = require("obsidian");
 var import_child_process = require("child_process");
+var import_fs = require("fs");
+var import_os = require("os");
 
 // utils/removeFormatting.ts
 function removeAllFormatting(md, options) {
@@ -225,6 +227,25 @@ var ListenUp = class extends import_obsidian3.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new SettingsTab(this.app, this));
+    
+    // Register context menu for temporary audio playback
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        // Only show the option if there's selected text
+        const multiselectText = getMultiselectText(editor);
+        if (multiselectText.length > 0) {
+          menu.addItem((item) => {
+            item
+              .setTitle("🔊 Listen to selected text")
+              .setIcon("audio-file")
+              .onClick(() => {
+                this.playSelectedTextTemporarily(editor);
+              });
+          });
+        }
+      })
+    );
+    
     this.addCommand({
       id: "convert-text-to-speech",
       name: "Convert text to speech",
@@ -333,6 +354,122 @@ error: ${error.message}`);
         );
       }
     });
+    
+    // Add command for temporary playback (can be assigned to hotkey)
+    this.addCommand({
+      id: "play-selected-text-temporarily",
+      name: "Play selected text (temporary)",
+      editorCallback: async (editor, _) => {
+        const multiselectText = getMultiselectText(editor);
+        if (multiselectText.length > 0) {
+          await this.playSelectedTextTemporarily(editor);
+        } else {
+          new import_obsidian3.Notice("No text selected for playback");
+        }
+      }
+    });
+  }
+  
+  async playSelectedTextTemporarily(editor) {
+    const notice = new import_obsidian3.Notice(
+      "🔊 Playing selected text...",
+      0
+    );
+    
+    try {
+      const basePath = getBasePath.call(this);
+      const tempAudioFileName = `temp-audio-${this.getRandomNumber()}-${Date.now()}.wav`;
+      const piperLocation = (0, import_obsidian3.normalizePath)(this.settings.piperExecutableFilePath);
+      const modelPath = (0, import_obsidian3.normalizePath)(this.settings.customModelFilePath);
+      const modelConfigPath = (0, import_obsidian3.normalizePath)(this.settings.customModelConfigFilePath);
+      const tempOutputFilePath = (0, import_obsidian3.normalizePath)(basePath + "/" + tempAudioFileName);
+      
+      const piperCommand = `"${piperLocation}" --model "${modelPath}" --config "${modelConfigPath}" --output_file "${tempOutputFilePath}" --sentence_silence 0.5 --length_scale 1`;
+      
+      // Get and process the selected text
+      let textToConvertToAudio = getMultiselectText(editor);
+      textToConvertToAudio = removeAllFormatting(
+        textToConvertToAudio,
+        {}
+      ).replaceAll('"', '\\"');
+      
+      // Generate the temporary audio file
+      (0, import_child_process.exec)(
+        `echo "${textToConvertToAudio}" | ${piperCommand}`,
+        async (error) => {
+          if (error) {
+            console.error(`TTS error: ${error.message}`);
+            notice.setMessage("❌ Failed to generate audio");
+            setTimeout(() => notice.hide(), 3000);
+            return;
+          }
+          
+          try {
+            // Play the audio file
+            await this.playAudioFile(tempOutputFilePath);
+            notice.setMessage("✅ Audio playback completed");
+            
+            // Clean up the temporary file after a short delay
+            setTimeout(() => {
+              this.cleanupTempFile(tempOutputFilePath);
+              notice.hide();
+            }, 1000);
+            
+          } catch (playError) {
+            console.error(`Audio playback error: ${playError.message}`);
+            notice.setMessage("❌ Failed to play audio");
+            setTimeout(() => {
+              this.cleanupTempFile(tempOutputFilePath);
+              notice.hide();
+            }, 3000);
+          }
+        }
+      );
+      
+    } catch (error) {
+      console.error(`Temporary playback error: ${error.message}`);
+      notice.setMessage("❌ Failed to process text for audio playback");
+      setTimeout(() => notice.hide(), 3000);
+    }
+  }
+  
+  async playAudioFile(filePath) {
+    return new Promise((resolve, reject) => {
+      let playCommand;
+      
+      // Determine the appropriate audio player based on the platform
+      const platform = import_os.platform();
+      
+      if (platform === 'win32') {
+        // Windows - use built-in media player
+        playCommand = `powershell -c "(New-Object Media.SoundPlayer '${filePath}').PlaySync()"`;
+      } else if (platform === 'darwin') {
+        // macOS - use afplay
+        playCommand = `afplay "${filePath}"`;
+      } else {
+        // Linux - try multiple players
+        playCommand = `paplay "${filePath}" || aplay "${filePath}" || ffplay -nodisp -autoexit "${filePath}"`;
+      }
+      
+      (0, import_child_process.exec)(playCommand, (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+  
+  cleanupTempFile(filePath) {
+    try {
+      if (import_fs.existsSync(filePath)) {
+        import_fs.unlinkSync(filePath);
+        console.log(`Cleaned up temporary audio file: ${filePath}`);
+      }
+    } catch (error) {
+      console.warn(`Failed to cleanup temporary file ${filePath}: ${error.message}`);
+    }
   }
   async onunload() {
   }
