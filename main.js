@@ -42,8 +42,20 @@ function removeAllFormatting(md, options) {
   options.abbr = options.hasOwnProperty("abbr") ? options.abbr : false;
   options.replaceLinksWithURL = options.hasOwnProperty("replaceLinksWithURL") ? options.replaceLinksWithURL : false;
   options.htmlTagsToSkip = options.hasOwnProperty("htmlTagsToSkip") ? options.htmlTagsToSkip : [];
+  
+  // New options for extended formatting removal
+  options.removeHighlights = options.hasOwnProperty("removeHighlights") ? options.removeHighlights : true;
+  options.removeInserts = options.hasOwnProperty("removeInserts") ? options.removeInserts : true;
+  options.removeComments = options.hasOwnProperty("removeComments") ? options.removeComments : true;
+  options.removeAngleBrackets = options.hasOwnProperty("removeAngleBrackets") ? options.removeAngleBrackets : true;
+  options.removeParentheses = options.hasOwnProperty("removeParentheses") ? options.removeParentheses : true;
+  options.removeCurlyBraces = options.hasOwnProperty("removeCurlyBraces") ? options.removeCurlyBraces : true;
+  options.customWrappers = options.hasOwnProperty("customWrappers") ? options.customWrappers : [];
+  options.customRegexPattern = options.hasOwnProperty("customRegexPattern") ? options.customRegexPattern : "";
+
   let output = md || "";
   output = output.replace(/^(-\s*?|\*\s*?|_\s*?){3,}\s*/gm, "");
+  
   try {
     if (options.stripListLeaders) {
       if (options.listUnicodeChar)
@@ -57,6 +69,65 @@ function removeAllFormatting(md, options) {
     if (options.abbr) {
       output = output.replace(/\*\[.*\]:.*\n/, "");
     }
+    
+    // Enhanced formatting removal rules
+    
+    // Remove highlights ==text==
+    if (options.removeHighlights) {
+      output = output.replace(/==(.*?)==/g, "$1");
+    }
+    
+    // Remove inserts ++text++
+    if (options.removeInserts) {
+      output = output.replace(/\+\+(.*?)\+\+/g, "$1");
+    }
+    
+    // Remove comments %%text%%
+    if (options.removeComments) {
+      output = output.replace(/%%.*?%%/g, "");
+    }
+    
+    // Remove angle brackets <<text>>
+    if (options.removeAngleBrackets) {
+      output = output.replace(/<<(.*?)>>/g, "$1");
+    }
+    
+    // Remove double parentheses ((text))
+    if (options.removeParentheses) {
+      output = output.replace(/\(\((.*?)\)\)/g, "$1");
+    }
+    
+    // Remove curly braces {{text}} (but not the listen tags)
+    if (options.removeCurlyBraces) {
+      output = output.replace(/{{(?!listen|\/listen)(.*?)}}/g, "$1");
+    }
+    
+    // Handle custom wrappers
+    if (options.customWrappers && Array.isArray(options.customWrappers)) {
+      for (const wrapper of options.customWrappers) {
+        if (wrapper.trim()) {
+          try {
+            // Escape special regex characters in the wrapper
+            const escapedWrapper = wrapper.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`${escapedWrapper}(.*?)${escapedWrapper}`, 'g');
+            output = output.replace(regex, "$1");
+          } catch (e) {
+            console.warn(`Invalid custom wrapper: ${wrapper}`, e);
+          }
+        }
+      }
+    }
+    
+    // Handle custom regex pattern
+    if (options.customRegexPattern && options.customRegexPattern.trim()) {
+      try {
+        const customRegex = new RegExp(options.customRegexPattern, 'g');
+        output = output.replace(customRegex, "");
+      } catch (e) {
+        console.warn(`Invalid custom regex pattern: ${options.customRegexPattern}`, e);
+      }
+    }
+    
     output = output.replace(/<[^>]*>/g, "");
     let htmlReplaceRegex = new RegExp("<[^>]*>", "g");
     if (options.htmlTagsToSkip.length > 0) {
@@ -133,8 +204,19 @@ var DEFAULT_SETTINGS = {
   customModelFilePath: "",
   customModelConfigFilePath: "",
   piperExecutableFilePath: "",
-  shouldUseCustomModel: true
+  shouldUseCustomModel: true,
+  
+  // Enhanced formatting removal settings
+  removeHighlights: true,
+  removeInserts: true,
+  removeComments: true,
+  removeAngleBrackets: true,
+  removeParentheses: true,
+  removeCurlyBraces: true,
+  customWrappers: [],
+  customRegexPattern: ""
 };
+
 var SettingsTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -143,10 +225,154 @@ var SettingsTab = class extends import_obsidian2.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    
+    // Audio settings section
+    containerEl.createEl("h2", { text: "Audio Settings" });
     this.addSettingToSelectPiperExecutablePath(containerEl);
     this.addSettingToSelectModelFilePath(containerEl);
     this.addSettingToSelectModelConfigFilePath(containerEl);
+    
+    // Formatting removal settings section
+    containerEl.createEl("h2", { text: "Text Formatting Removal" });
+    containerEl.createEl("p", { 
+      text: "Configure which formatting elements should be removed from text before converting to speech.",
+      cls: "setting-item-description"
+    });
+    
+    this.addFormattingToggleSettings(containerEl);
+    this.addCustomWrappersSettings(containerEl);
+    this.addCustomRegexSettings(containerEl);
   }
+  
+  addFormattingToggleSettings(containerEl) {
+    new import_obsidian2.Setting(containerEl)
+      .setName("Remove highlights (==text==)")
+      .setDesc("Remove highlight formatting before TTS conversion")
+      .addToggle((component) => {
+        component.setValue(this.plugin.settings.removeHighlights);
+        component.onChange((value) => {
+          this.plugin.settings.removeHighlights = value;
+          this.plugin.saveSettings();
+        });
+      });
+      
+    new import_obsidian2.Setting(containerEl)
+      .setName("Remove inserts (++text++)")
+      .setDesc("Remove insert formatting before TTS conversion")
+      .addToggle((component) => {
+        component.setValue(this.plugin.settings.removeInserts);
+        component.onChange((value) => {
+          this.plugin.settings.removeInserts = value;
+          this.plugin.saveSettings();
+        });
+      });
+      
+    new import_obsidian2.Setting(containerEl)
+      .setName("Remove comments (%%text%%)")
+      .setDesc("Remove comment blocks before TTS conversion")
+      .addToggle((component) => {
+        component.setValue(this.plugin.settings.removeComments);
+        component.onChange((value) => {
+          this.plugin.settings.removeComments = value;
+          this.plugin.saveSettings();
+        });
+      });
+      
+    new import_obsidian2.Setting(containerEl)
+      .setName("Remove angle brackets (<<text>>)")
+      .setDesc("Remove angle bracket formatting before TTS conversion")
+      .addToggle((component) => {
+        component.setValue(this.plugin.settings.removeAngleBrackets);
+        component.onChange((value) => {
+          this.plugin.settings.removeAngleBrackets = value;
+          this.plugin.saveSettings();
+        });
+      });
+      
+    new import_obsidian2.Setting(containerEl)
+      .setName("Remove double parentheses ((text))")
+      .setDesc("Remove double parentheses formatting before TTS conversion")
+      .addToggle((component) => {
+        component.setValue(this.plugin.settings.removeParentheses);
+        component.onChange((value) => {
+          this.plugin.settings.removeParentheses = value;
+          this.plugin.saveSettings();
+        });
+      });
+      
+    new import_obsidian2.Setting(containerEl)
+      .setName("Remove curly braces ({{text}})")
+      .setDesc("Remove curly brace formatting before TTS conversion (excludes {{listen}} tags)")
+      .addToggle((component) => {
+        component.setValue(this.plugin.settings.removeCurlyBraces);
+        component.onChange((value) => {
+          this.plugin.settings.removeCurlyBraces = value;
+          this.plugin.saveSettings();
+        });
+      });
+  }
+  
+  addCustomWrappersSettings(containerEl) {
+    const wrapperContainer = containerEl.createDiv();
+    
+    new import_obsidian2.Setting(wrapperContainer)
+      .setName("Custom wrapper characters")
+      .setDesc("Add custom characters that wrap text to be removed (e.g., ** for **bold**, ~~ for ~~strikethrough~~)")
+      .addButton((button) => {
+        button
+          .setButtonText("Add custom wrapper")
+          .setCta()
+          .onClick(() => {
+            this.plugin.settings.customWrappers.push("");
+            this.plugin.saveSettings();
+            this.display();
+          });
+      });
+    
+    // Display existing custom wrappers
+    this.plugin.settings.customWrappers.forEach((wrapper, index) => {
+      new import_obsidian2.Setting(wrapperContainer)
+        .setName(`Custom wrapper ${index + 1}`)
+        .addText((text) => {
+          text.setPlaceholder("e.g., ** or ~~ or @@")
+            .setValue(wrapper)
+            .onChange((value) => {
+              this.plugin.settings.customWrappers[index] = value;
+              this.plugin.saveSettings();
+            });
+        })
+        .addButton((button) => {
+          button
+            .setIcon("trash")
+            .setTooltip("Remove this custom wrapper")
+            .onClick(() => {
+              this.plugin.settings.customWrappers.splice(index, 1);
+              this.plugin.saveSettings();
+              this.display();
+            });
+        });
+    });
+  }
+  
+  addCustomRegexSettings(containerEl) {
+    new import_obsidian2.Setting(containerEl)
+      .setName("Custom regex pattern")
+      .setDesc("Advanced: Enter a custom regex pattern to remove specific text patterns. Use with caution!")
+      .addTextArea((text) => {
+        text.setPlaceholder("e.g., \\[\\[.*?\\]\\] to remove all wiki links")
+          .setValue(this.plugin.settings.customRegexPattern)
+          .onChange((value) => {
+            this.plugin.settings.customRegexPattern = value;
+            this.plugin.saveSettings();
+          });
+      });
+      
+    containerEl.createEl("p", { 
+      text: "Examples: \\d{4}-\\d{2}-\\d{2} (removes dates), #\\w+ (removes hashtags), @\\w+ (removes mentions)",
+      cls: "setting-item-description"
+    });
+  }
+  
   addSettingToSelectModelFilePath(containerEl) {
     new import_obsidian2.Setting(containerEl).setName("Select custom model file").setDesc(`File that ends with .onnx`).addText((component) => {
       component.setDisabled(true);
@@ -284,9 +510,21 @@ var ListenUp = class extends import_obsidian3.Plugin {
         }
         // Otherwise, use the entire document content (existing behavior)
         
+        // Create formatting options from settings
+        const formattingOptions = {
+          removeHighlights: this.settings.removeHighlights,
+          removeInserts: this.settings.removeInserts,
+          removeComments: this.settings.removeComments,
+          removeAngleBrackets: this.settings.removeAngleBrackets,
+          removeParentheses: this.settings.removeParentheses,
+          removeCurlyBraces: this.settings.removeCurlyBraces,
+          customWrappers: this.settings.customWrappers,
+          customRegexPattern: this.settings.customRegexPattern
+        };
+        
         textToConvertToAudio = removeAllFormatting(
           textToConvertToAudio != null ? textToConvertToAudio : " ",
-          {}
+          formattingOptions
           // @ts-ignore
         ).replaceAll('"', '\\"');
         (0, import_child_process.exec)(
@@ -386,11 +624,23 @@ error: ${error.message}`);
       
       const piperCommand = `"${piperLocation}" --model "${modelPath}" --config "${modelConfigPath}" --output_file "${tempOutputFilePath}" --sentence_silence 0.5 --length_scale 1`;
       
-      // Get and process the selected text
+      // Get and process the selected text with formatting options from settings
       let textToConvertToAudio = getMultiselectText(editor);
+      
+      const formattingOptions = {
+        removeHighlights: this.settings.removeHighlights,
+        removeInserts: this.settings.removeInserts,
+        removeComments: this.settings.removeComments,
+        removeAngleBrackets: this.settings.removeAngleBrackets,
+        removeParentheses: this.settings.removeParentheses,
+        removeCurlyBraces: this.settings.removeCurlyBraces,
+        customWrappers: this.settings.customWrappers,
+        customRegexPattern: this.settings.customRegexPattern
+      };
+      
       textToConvertToAudio = removeAllFormatting(
         textToConvertToAudio,
-        {}
+        formattingOptions
       ).replaceAll('"', '\\"');
       
       // Generate the temporary audio file
