@@ -82,6 +82,49 @@ function getBasePath() {
   return "~/";
 }
 
+// utils/multiselect.ts
+function getMultiselectText(editor) {
+  // Get all selections (including multiselect)
+  const selections = editor.listSelections();
+  
+  if (!selections || selections.length === 0) {
+    return "";
+  }
+  
+  // If only one selection and it's empty (just cursor), return empty
+  if (selections.length === 1 && selections[0].anchor.line === selections[0].head.line && selections[0].anchor.ch === selections[0].head.ch) {
+    return "";
+  }
+  
+  // Extract text from all selections and merge them
+  const selectedTexts = [];
+  
+  for (const selection of selections) {
+    // Determine the start and end positions of the selection
+    const from = {
+      line: Math.min(selection.anchor.line, selection.head.line),
+      ch: selection.anchor.line === selection.head.line ? 
+          Math.min(selection.anchor.ch, selection.head.ch) : 
+          (selection.anchor.line < selection.head.line ? selection.anchor.ch : selection.head.ch)
+    };
+    const to = {
+      line: Math.max(selection.anchor.line, selection.head.line),
+      ch: selection.anchor.line === selection.head.line ? 
+          Math.max(selection.anchor.ch, selection.head.ch) : 
+          (selection.anchor.line > selection.head.line ? selection.anchor.ch : selection.head.ch)
+    };
+    
+    // Get the selected text
+    const selectedText = editor.getRange(from, to);
+    if (selectedText.trim().length > 0) {
+      selectedTexts.push(selectedText.trim());
+    }
+  }
+  
+  // Join all selected texts with a separator (space or period for natural speech flow)
+  return selectedTexts.join(". ");
+}
+
 // Settings.ts
 var import_obsidian2 = require("obsidian");
 var DEFAULT_SETTINGS = {
@@ -207,12 +250,19 @@ var ListenUp = class extends import_obsidian3.Plugin {
         const regExMatch = textToConvertToAudio.match(
           /{{listen}}([\s\S]*?){{\/listen}}/g
         );
-        const userSelection = editor.getSelection();
+        
+        // Enhanced multiselect support - get all selected text and merge it
+        const multiselectText = getMultiselectText(editor);
+        
         if (regExMatch !== null) {
+          // If there are {{listen}} tags, use those
           textToConvertToAudio = regExMatch.join(", ").replaceAll(/{{listen}}|{{\/listen}}/g, "");
-        } else if (userSelection.length) {
-          textToConvertToAudio = userSelection;
+        } else if (multiselectText.length > 0) {
+          // If there are selections (single or multi), use the merged selected text
+          textToConvertToAudio = multiselectText;
         }
+        // Otherwise, use the entire document content (existing behavior)
+        
         textToConvertToAudio = removeAllFormatting(
           textToConvertToAudio != null ? textToConvertToAudio : " ",
           {}
@@ -229,22 +279,52 @@ error: ${error.message}`);
               return;
             }
             const markdownLink = `![[${audioFileName}]]`;
-            const userSelection = editor.getSelection(); // Get the currently selected text
-            const cursorStart = editor.getCursor("from"); // Get the start position of the selection
-            const cursorEnd = editor.getCursor("to"); // Get the end position of the selection
-
-            // If there's a selection, insert the link immediately after the selection.
-            // If there's no selection (just a cursor), insert it at the cursor position.
-            editor.replaceRange(
-                markdownLink,
-                cursorEnd // Insert at the end of the selection or cursor position
-            );
-
-            // If text was selected, adjust the cursor back to the end of the original selection
-            // so the user can continue typing there, and the newly inserted link doesn't move it.
-            if (userSelection.length > 0) {
-                editor.setCursor({ line: cursorEnd.line, ch: cursorEnd.ch + markdownLink.length });
+            
+            // Get the current cursor position or the last selection position
+            const selections = editor.listSelections();
+            let insertPosition;
+            
+            if (selections && selections.length > 0) {
+              // Find the last (bottom-most) selection to insert the audio link after it
+              const lastSelection = selections.reduce((latest, current) => {
+                const currentEnd = {
+                  line: Math.max(current.anchor.line, current.head.line),
+                  ch: current.anchor.line === current.head.line ? 
+                      Math.max(current.anchor.ch, current.head.ch) : 
+                      (current.anchor.line > current.head.line ? current.anchor.ch : current.head.ch)
+                };
+                
+                const latestEnd = {
+                  line: Math.max(latest.anchor.line, latest.head.line),
+                  ch: latest.anchor.line === latest.head.line ? 
+                      Math.max(latest.anchor.ch, latest.head.ch) : 
+                      (latest.anchor.line > latest.head.line ? latest.anchor.ch : latest.head.ch)
+                };
+                
+                return (currentEnd.line > latestEnd.line || 
+                       (currentEnd.line === latestEnd.line && currentEnd.ch > latestEnd.ch)) ? 
+                       current : latest;
+              });
+              
+              insertPosition = {
+                line: Math.max(lastSelection.anchor.line, lastSelection.head.line),
+                ch: lastSelection.anchor.line === lastSelection.head.line ? 
+                    Math.max(lastSelection.anchor.ch, lastSelection.head.ch) : 
+                    (lastSelection.anchor.line > lastSelection.head.line ? lastSelection.anchor.ch : lastSelection.head.ch)
+              };
+            } else {
+              // Fallback to current cursor position
+              insertPosition = editor.getCursor("to");
             }
+
+            // Insert the markdown link at the determined position
+            editor.replaceRange(markdownLink, insertPosition);
+
+            // Set cursor after the inserted link
+            editor.setCursor({ 
+              line: insertPosition.line, 
+              ch: insertPosition.ch + markdownLink.length 
+            });
 
             setTimeout(() => {
               notice.hide();
@@ -270,6 +350,5 @@ error: ${error.message}`);
     await this.saveData(this.settings);
   }
 };
-
 
 /* nosourcemap */
