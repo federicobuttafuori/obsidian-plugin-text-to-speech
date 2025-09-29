@@ -457,7 +457,7 @@ var ListenUp = class extends import_obsidian3.Plugin {
     // Register context menu for temporary audio playback (editor only)
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor, view) => {
-        // Only show the option if there's selected text in the editor
+        // Only show the option if there's selected text
         const multiselectText = getMultiselectText(editor);
         if (multiselectText.length > 0) {
           menu.addItem((item) => {
@@ -471,64 +471,6 @@ var ListenUp = class extends import_obsidian3.Plugin {
         }
       })
     );
-
-    // Register a global DOM contextmenu listener so the TTS option appears in ANY text selection context
-    // (including read-only views such as spaced repetition windows). It will do nothing when no text is selected.
-    this.registerDomEvent(document, "contextmenu", (evt) => {
-      try {
-        // Get selected text using the Selection API
-        const sel = window.getSelection ? window.getSelection() : null;
-        let selectedText = "";
-        if (sel) {
-          selectedText = sel.toString();
-        }
-
-        // If nothing selected, also check active element (inputs/textarea) for selected text
-        if ((!selectedText || selectedText.trim().length === 0) && document.activeElement) {
-          const ae = document.activeElement;
-          try {
-            if ((ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) && ae.selectionStart !== undefined) {
-              const start = ae.selectionStart;
-              const end = ae.selectionEnd;
-              if (start !== end) {
-                selectedText = ae.value.substring(start, end);
-              }
-            } else if (ae && ae.getAttribute && ae.getAttribute("contenteditable") === "true") {
-              // contenteditable elements - use Selection API fallback
-              selectedText = (window.getSelection ? window.getSelection().toString() : "") || "";
-            }
-          } catch (e) {
-            // ignore
-          }
-        }
-
-        if (!selectedText || selectedText.trim().length === 0) {
-          // Do nothing if no selection (per user request)
-          return;
-        }
-
-        // Normalize whitespace
-        selectedText = selectedText.trim();
-        // Build an Obsidian menu at cursor position that contains the TTS action
-        const menu = new import_obsidian3.Menu(this.app);
-        menu.addItem((item) => {
-          item
-            .setTitle("🔊 Listen to selected text")
-            .setIcon("audio-file")
-            .onClick(() => {
-              // Use the new helper that accepts a plain string (applies formatting removal settings)
-              this.playTextTemporarily(selectedText);
-            });
-        });
-        // Show menu near the mouse click
-        // Use coordinates from the event if available
-        const x = evt.clientX || (evt.pageX || 0);
-        const y = evt.clientY || (evt.pageY || 0);
-        menu.showAtPosition({ x, y });
-      } catch (error) {
-        console.error("Context menu TTS handler error:", error);
-      }
-    });
     
     this.addCommand({
       id: "convert-text-to-speech",
@@ -662,6 +604,126 @@ error: ${error.message}`);
         } else {
           new import_obsidian3.Notice("No text selected for playback");
         }
+      }
+    });
+
+    // --- GLOBAL CONTEXT-MENU HANDLER (fixed to avoid double menus) ---
+    // Problem previously: our custom menu showed in addition to the default/native context menu,
+    // resulting in two menus stacked. Fix strategy:
+    // 1. Only intercept non-editor contexts (editor already has 'editor-menu' hooked by Obsidian).
+    // 2. When there's selected text in a non-editor area, preventDefault() and show a single Obsidian Menu
+    //    that includes "Copy" and "Listen to selected text" entries — so users get a single cohesive menu.
+    // 3. When no text selected, do nothing (per user request).
+    this.registerDomEvent(document, "contextmenu", (evt) => {
+      try {
+        // Make sure it's a real mouse event
+        if (!evt || !evt.target) return;
+
+        // If the right-click happened inside a CodeMirror/editor area, let Obsidian handle it (avoid duplicate menus)
+        // CodeMirror/Obsidian editor elements usually have classes like 'cm-editor' or 'CodeMirror'
+        // We also skip if the click is inside Obsidian's own UI that likely provides a menu already.
+        const targetEl = evt.target instanceof Element ? evt.target : null;
+        if (targetEl) {
+          // Elements we should NOT override because Obsidian provides its own menu behavior:
+          const skipSelector = [
+            ".cm-editor", ".CodeMirror", ".markdown-source-view", // editors / source
+            ".workspace-leaf .view-header", ".app-container .workspace-leaf", // common Obsidian containers where native menus may be desired
+            ".obsidian-context-menu" // hypothetical/defensive
+          ].join(",");
+          if (targetEl.closest && targetEl.closest(skipSelector)) {
+            return; // let the existing menu (or editor-menu) run
+          }
+        }
+
+        // Get selected text using Selection API
+        const sel = window.getSelection ? window.getSelection() : null;
+        let selectedText = "";
+        if (sel) {
+          selectedText = sel.toString();
+        }
+
+        // If nothing selected, also check active element (inputs/textarea) for selected text ranges
+        if ((!selectedText || selectedText.trim().length === 0) && document.activeElement) {
+          const ae = document.activeElement;
+          try {
+            if ((ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) && ae.selectionStart !== undefined) {
+              const start = ae.selectionStart;
+              const end = ae.selectionEnd;
+              if (start !== end) {
+                selectedText = ae.value.substring(start, end);
+              }
+            } else if (ae && ae.getAttribute && ae.getAttribute("contenteditable") === "true") {
+              // contenteditable elements - use Selection API fallback
+              selectedText = (window.getSelection ? window.getSelection().toString() : "") || "";
+            }
+          } catch (e) {
+            // ignore selection check errors
+          }
+        }
+
+        if (!selectedText || selectedText.trim().length === 0) {
+          // Do nothing if no selection (per user request)
+          return;
+        }
+
+        // Normalize selected text
+        selectedText = selectedText.trim();
+        // Prevent the native OS/browser context menu from appearing (so we only show one menu)
+        evt.preventDefault();
+        evt.stopPropagation();
+
+        // Build an Obsidian Menu (single coherent menu containing Copy + Listen)
+        const menu = new import_obsidian3.Menu(this.app);
+
+        // Copy action (keeps parity with the native "Copy" behavior)
+        menu.addItem((item) => {
+          item
+            .setTitle("Copy")
+            .setIcon("copy-clipboard")
+            .onClick(async () => {
+              // Try navigator.clipboard first, fallback to execCommand
+              try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                  await navigator.clipboard.writeText(selectedText);
+                } else {
+                  // Fallback: create temporary textarea
+                  const ta = document.createElement("textarea");
+                  ta.value = selectedText;
+                  ta.style.position = "fixed";
+                  ta.style.left = "-9999px";
+                  document.body.appendChild(ta);
+                  ta.focus();
+                  ta.select();
+                  try {
+                    document.execCommand("copy");
+                  } catch (e) {
+                    console.warn("Fallback copy failed", e);
+                  }
+                  document.body.removeChild(ta);
+                }
+              } catch (copyErr) {
+                console.error("Copy failed:", copyErr);
+              }
+            });
+        });
+
+        // Listen (TTS) action
+        menu.addItem((item) => {
+          item
+            .setTitle("🔊 Listen to selected text")
+            .setIcon("audio-file")
+            .onClick(() => {
+              // Use helper that accepts a plain string (applies formatting removal settings)
+              this.playTextTemporarily(selectedText);
+            });
+        });
+
+        // Show the menu at mouse position
+        const x = evt.clientX || (evt.pageX || 0);
+        const y = evt.clientY || (evt.pageY || 0);
+        menu.showAtPosition({ x, y });
+      } catch (error) {
+        console.error("Global contextmenu handler error:", error);
       }
     });
   }
