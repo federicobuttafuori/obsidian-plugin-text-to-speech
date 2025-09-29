@@ -454,10 +454,10 @@ var ListenUp = class extends import_obsidian3.Plugin {
     await this.loadSettings();
     this.addSettingTab(new SettingsTab(this.app, this));
     
-    // Register context menu for temporary audio playback
+    // Register context menu for temporary audio playback (editor only)
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor, view) => {
-        // Only show the option if there's selected text
+        // Only show the option if there's selected text in the editor
         const multiselectText = getMultiselectText(editor);
         if (multiselectText.length > 0) {
           menu.addItem((item) => {
@@ -471,6 +471,64 @@ var ListenUp = class extends import_obsidian3.Plugin {
         }
       })
     );
+
+    // Register a global DOM contextmenu listener so the TTS option appears in ANY text selection context
+    // (including read-only views such as spaced repetition windows). It will do nothing when no text is selected.
+    this.registerDomEvent(document, "contextmenu", (evt) => {
+      try {
+        // Get selected text using the Selection API
+        const sel = window.getSelection ? window.getSelection() : null;
+        let selectedText = "";
+        if (sel) {
+          selectedText = sel.toString();
+        }
+
+        // If nothing selected, also check active element (inputs/textarea) for selected text
+        if ((!selectedText || selectedText.trim().length === 0) && document.activeElement) {
+          const ae = document.activeElement;
+          try {
+            if ((ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) && ae.selectionStart !== undefined) {
+              const start = ae.selectionStart;
+              const end = ae.selectionEnd;
+              if (start !== end) {
+                selectedText = ae.value.substring(start, end);
+              }
+            } else if (ae && ae.getAttribute && ae.getAttribute("contenteditable") === "true") {
+              // contenteditable elements - use Selection API fallback
+              selectedText = (window.getSelection ? window.getSelection().toString() : "") || "";
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        if (!selectedText || selectedText.trim().length === 0) {
+          // Do nothing if no selection (per user request)
+          return;
+        }
+
+        // Normalize whitespace
+        selectedText = selectedText.trim();
+        // Build an Obsidian menu at cursor position that contains the TTS action
+        const menu = new import_obsidian3.Menu(this.app);
+        menu.addItem((item) => {
+          item
+            .setTitle("🔊 Listen to selected text")
+            .setIcon("audio-file")
+            .onClick(() => {
+              // Use the new helper that accepts a plain string (applies formatting removal settings)
+              this.playTextTemporarily(selectedText);
+            });
+        });
+        // Show menu near the mouse click
+        // Use coordinates from the event if available
+        const x = evt.clientX || (evt.pageX || 0);
+        const y = evt.clientY || (evt.pageY || 0);
+        menu.showAtPosition({ x, y });
+      } catch (error) {
+        console.error("Context menu TTS handler error:", error);
+      }
+    });
     
     this.addCommand({
       id: "convert-text-to-speech",
@@ -680,6 +738,75 @@ error: ${error.message}`);
       console.error(`Temporary playback error: ${error.message}`);
       notice.setMessage("❌ Failed to process text for audio playback");
       setTimeout(() => notice.hide(), 3000);
+    }
+  }
+
+  // New helper: play arbitrary text (string) temporarily — used by global context menu (non-editor selections)
+  async playTextTemporarily(text) {
+    const notice = new import_obsidian3.Notice(
+      "🔊 Playing selected text...",
+      0
+    );
+    try {
+      if (!text || String(text).trim().length === 0) {
+        notice.setMessage("No text selected for playback");
+        setTimeout(() => notice.hide(), 1000);
+        return;
+      }
+
+      const basePath = getBasePath.call(this);
+      const tempAudioFileName = `temp-audio-${this.getRandomNumber()}-${Date.now()}.wav`;
+      const piperLocation = (0, import_obsidian3.normalizePath)(this.settings.piperExecutableFilePath);
+      const modelPath = (0, import_obsidian3.normalizePath)(this.settings.customModelFilePath);
+      const modelConfigPath = (0, import_obsidian3.normalizePath)(this.settings.customModelConfigFilePath);
+      const tempOutputFilePath = (0, import_obsidian3.normalizePath)(basePath + "/" + tempAudioFileName);
+
+      const piperCommand = `"${piperLocation}" --model "${modelPath}" --config "${modelConfigPath}" --output_file "${tempOutputFilePath}" --sentence_silence 0.5 --length_scale 1`;
+
+      const formattingOptions = {
+        removeHighlights: this.settings.removeHighlights,
+        removeInserts: this.settings.removeInserts,
+        removeComments: this.settings.removeComments,
+        removeAngleBrackets: this.settings.removeAngleBrackets,
+        removeParentheses: this.settings.removeParentheses,
+        removeCurlyBraces: this.settings.removeCurlyBraces,
+        customWrappers: this.settings.customWrappers,
+        customRegexPattern: this.settings.customRegexPattern
+      };
+
+      let textToConvertToAudio = removeAllFormatting(String(text), formattingOptions).replaceAll('"', '\\"');
+
+      (0, import_child_process.exec)(
+        `echo "${textToConvertToAudio}" | ${piperCommand}`,
+        async (error) => {
+          if (error) {
+            console.error(`TTS error: ${error.message}`);
+            notice.setMessage("❌ Failed to generate audio");
+            setTimeout(() => notice.hide(), 3000);
+            return;
+          }
+
+          try {
+            await this.playAudioFile(tempOutputFilePath);
+            notice.setMessage("✅ Audio playback completed");
+            setTimeout(() => {
+              this.cleanupTempFile(tempOutputFilePath);
+              notice.hide();
+            }, 1000);
+          } catch (playError) {
+            console.error(`Audio playback error: ${playError.message}`);
+            notice.setMessage("❌ Failed to play audio");
+            setTimeout(() => {
+              this.cleanupTempFile(tempOutputFilePath);
+              notice.hide();
+            }, 3000);
+          }
+        }
+      );
+    } catch (err) {
+      console.error("playTextTemporarily error:", err);
+      notice.setMessage("❌ Failed to play selected text");
+      setTimeout(() => notice.hide(), 2000);
     }
   }
   
